@@ -13,6 +13,9 @@ from smartcard.CardConnectionObserver import ConsoleCardConnectionObserver
 from smartcard.CardConnectionDecorator import CardConnectionDecorator
 # Card monitoring
 from smartcard.CardMonitoring import CardMonitor, CardObserver
+# import card parser
+from card.ICC import *
+from card.utils import *
 # other imports
 from time import sleep
 import sys
@@ -20,6 +23,143 @@ import sys
 # callbacks for global Event handling
 _callbacks = {}
 
+
+
+
+
+# main function
+def main():
+    # set event handlers
+    Event.on('insert', cardInsert)
+    Event.on('remove', cardRemove)
+    
+    print('Scanning for cards')
+    cardmonitor = CardMonitor()
+    cardobserver = Observer()
+    cardmonitor.addObserver(cardobserver)
+    # remove the cardmonitor afterwards
+    # cardmonitor.deleteObserver(cardobserver)
+
+    while True:
+        continue
+    
+
+def cardInsert(atr):
+    
+    try:
+        a = ISO7816()
+        a.ATR_scan()
+        
+    except smartcard.Exceptions.CardConnectionException as e:
+        print(e)
+        
+    return
+
+
+def cardRemove():
+    return
+
+
+class EMV(ISO7816):
+    dbg = 2
+    
+    # AID RID & PIX codes taken from wikipedia
+    AID_RID = {
+        (0xA0, 0x00, 0x00, 0x00, 0x03): 'Visa',
+        (0xA0, 0x00, 0x00, 0x00, 0x04): 'MasterCard',
+        (0xA0, 0x00, 0x00, 0x00, 0x05): 'MasterCard',
+        (0xA0, 0x00, 0x00, 0x00, 0x25): 'American Express',
+        (0xA0, 0x00, 0x00, 0x00, 0x29): 'LINK ATM (UK)',
+        (0xA0, 0x00, 0x00, 0x00, 0x42): 'CB (FR)',
+        (0xA0, 0x00, 0x00, 0x00, 0x65): 'JCB (JP)',
+        (0xA0, 0x00, 0x00, 0x01, 0x21): 'Dankort (DN)',
+        (0xA0, 0x00, 0x00, 0x01, 0x41): 'CoGeBan (IT)',
+        (0xA0, 0x00, 0x00, 0x01, 0x52): 'Diners Club', # 'Discover'
+        (0xA0, 0x00, 0x00, 0x01, 0x54): 'Banrisul (BR)',
+        (0xA0, 0x00, 0x00, 0x02, 0x28): 'SPAN2 (SA)',
+        (0xA0, 0x00, 0x00, 0x02, 0x77): 'Interac (CA)',
+        (0xA0, 0x00, 0x00, 0x03, 0x33): 'China UnionPay',
+        (0xA0, 0x00, 0x00, 0x03, 0x59): 'ZKA (DE)',
+        }
+    
+    AID_Visa_PIX = {
+        (0x10, 0x10): 'credit or debit',
+        (0x20, 0x10): 'Electron',
+        (0x20, 0x20): 'V Pay',
+        (0x80, 0x10): 'Plus',
+        }
+    
+    AID_MasterCard_PIX = {
+        (0x10, 0x10): 'credit or debit',
+        (0x99, 0x99): 'paypass',
+        (0x30, 0x60): 'Maestro',
+        (0x60, 0x00): 'Cirrus',
+        }
+    
+    AID_ChinaUnionPay_PIX = {
+        (0x01, 0x01, 0x01): 'debit',
+        (0x01, 0x01, 0x02): 'credit',
+        (0x01, 0x01, 0x03): 'quasi credit',
+        }
+    
+    
+    def __init__(self):
+        '''
+        initializes like an ISO7816-4 card with CLA=0x00
+        and check available AID (Application ID) read straight after card init
+        '''
+        ISO7816.__init__(self, CLA=0x00)
+        self.AID = []
+        
+        if self.dbg >= 2:
+            log(3, '(UICC.__init__) type definition: %s' % type(self))
+            log(3, '(UICC.__init__) CLA definition: %s' % hex(self.CLA))
+    
+    
+    def get_AID(self):
+        '''
+        checks AID straight after card init, 
+        and read available AID (Application ID) referenced
+        
+        puts it into self.AID
+        '''
+        # read record to get EMV Application DF supported by the ICC
+        recs = []
+        SFI = 1 # I dont know exactly why... but it works, at least
+        index = 1
+        while True:
+            ret = self.READ_RECORD(P1=index, P2=(SFI<<3)|4)
+            index += 1
+            if ret[2] == (0x90, 0x0):
+                recs.append(ret[3])
+            else:
+                break
+        
+        for rec in recs:
+            # try to interpret EMV AID
+            if (rec[0], rec[2]) == (0x70, 0x61) and len(rec) >= 11 \
+            and rec[6:6+rec[5]] not in self.AID:
+                self.AID.append( rec[6:6+rec[5]] )
+            if self.dbg:
+                log(3, '(EMV.__init__) AID found: %s' % EMV.interpret_AID(self.AID[-1]))
+    
+    @staticmethod
+    def interpret_AID(aid=[]):
+        aid = tuple(aid)
+        inter = ''
+        if aid[:5] in self.AID_RID:
+            inter = self.AID_RID[aid[:5]]
+            if aid[:5] == (0xA0, 0x00, 0x00, 0x00, 0x03):
+                inter += ' - %s' % self.AID_Visa_PIX
+            elif aid[:5] in ((0xA0, 0x00, 0x00, 0x00, 0x04), \
+                             (0xA0, 0x00, 0x00, 0x00, 0x05)):
+                inter += ' - %s' % self.AID_MasterCard_PIX
+            elif aid[:5] in (0xA0, 0x00, 0x00, 0x03, 0x33):
+                inter += ' - %s' % self.AID_ChinaUnionPay_PIX
+        else:
+            inter = 'unkown EMV AID'
+        
+        return inter
 
 
 class Observer(CardObserver):
@@ -33,7 +173,7 @@ class Observer(CardObserver):
             Event.emit('insert', toHexString(card.atr))
             
         for card in removedcards:
-            print("-Removed: ", toHexString(card.atr))
+            print("-Removed:  ", toHexString(card.atr))
             Event.emit('remove')
 
 
@@ -86,157 +226,6 @@ class Event():
     def off(event_name, f):
         _callbacks.get(event_name, []).remove(f)
         
-
-# main function
-def main():
-    # set event handlers
-    Event.on('insert', cardInsert)
-    Event.on('remove', cardRemove)
-    
-    print('Scanning for cards')
-    cardmonitor = CardMonitor()
-    cardobserver = Observer()
-    cardmonitor.addObserver(cardobserver)
-    # remove the cardmonitor afterwards
-    # cardmonitor.deleteObserver(cardobserver)
-
-    while True:
-        continue
-    
-
-
-def cardInsert(atr):
-    requestByATR(atr)
-    
-    # define the apdus used in this script
-    GET_RESPONSE = [0XA0, 0XC0, 00, 00]
-    SELECT = [0xA0, 0xA4, 0x00, 0x00, 0x02]
-    DF_TELECOM = [0x7F, 0x10]
-
-    # request any card type
-    cardtype = ATRCardType(toBytes(atr))
-    cardrequest = CardRequest(timeout=1, cardType=cardtype)
-    cardservice = cardrequest.waitforcard()
-
-    # attach our decorator
-    cardservice.connection = SecureChannelConnection(cardservice.connection)
-
-    # connect to the card and perform a few transmits
-    cardservice.connection.connect()
-
-    print('ATR', toHexString(cardservice.connection.getATR()))
-
-    apdu = SELECT + DF_TELECOM
-    response, sw1, sw2 = cardservice.connection.transmit(apdu)
-
-    if sw1 == 0x9F:
-        apdu = GET_RESPONSE + [sw2]
-        response, sw1, sw2 = cardservice.connection.transmit(apdu)
-    return
-
-def cardRemove():
-    return
-
-'''
-Connects to the first card reader
-'''
-def simpleConnection():
-    
-    r = readers()
-    # get list of smart card readers
-    if len(r) == 0:
-        print('No reader found')
-        return
-    
-    print(r)
-
-    connection = r[0].createConnection()
-
-    # connect to first card reader
-    try:
-        connection.connect()
-        print('Card detected')
-    except smartcard.Exceptions.NoCardException:
-        print('No reader/card connected')
-        return
-    except smartcard.Exceptions.CardConnectionException as e:
-        print(e)
-        return
-
-
-'''
-The first answer of a smart card inserted in a smart card reader is call the ATR. The purpose of the ATR is to describe the supported communication parameters.
-The smart card reader, smart card reader driver, and operating system will use these parameters to establish a communication with the card. The ATR is described in the ISO7816-3 standard.
-The first bytes of the ATR describe the voltage convention (direct or inverse), followed by bytes describing the available communication interfaces and their respective parameters.
-These interface bytes are then followed by Historical Bytes which are not standardized, and are useful for transmitting proprietary information such as the card type, the version of the embedded software, or the card state.
-Finally these historical bytes are eventually followed by a checksum byte.
-'''
-def getATR():
-    
-    atr = ATR([0x3B, 0x9E, 0x95, 0x80, 0x1F, 0xC3, 0x80, 0x31, 0xA0, 0x73, 0xBE, 0x21, 0x13, 0x67, 0x29, 0x02, 0x01, 0x01, 0x81, 0xCD, 0xB9])
-
-    print(atr)
-    print('historical bytes: ', toHexString(atr.getHistoricalBytes()))
-    print('checksum: ', "0x%X" % atr.getChecksum())
-    print('checksum OK: ', atr.checksumOK)
-    print('T0  supported: ', atr.isT0Supported())
-    print('T1  supported: ', atr.isT1Supported())
-    print('T15 supported: ', atr.isT15Supported())    
-
-'''
-request a card by a specific card type (ATR)
-'''
-def requestByATR(atr):
-    print('\n========== REQUEST BY ATR ==========\n')
-    # example: ATR of German ID Card, only works with ISO 14443 devices
-    # cardtype = ATRCardType(toBytes("3B 88 80 01 00 00 00 00 00 00 00 00 09"))
-    cardtype = ATRCardType(toBytes(atr))
-    # also supports masks
-    # cardtype = ATRCardType( toBytes( "3B 15 94 20 02 01 00 00 0F" ), toBytes( "00 00 FF FF FF FF FF FF 00" ) )
-    cardrequest = CardRequest(timeout=1, cardType=cardtype)
-    try:
-        cardservice = cardrequest.waitforcard()
-        print('Card detected successfully')
-        return True
-    except smartcard.Exceptions.CardRequestTimeoutException:
-        print('Wrong card type')
-        return False
-    
-    cardservice.connection.connect()
-    print(toHexString(cardservice.connection.getATR()))
-
-'''
-Card connection observers to trace apdu transmission
-'''
-def connectionObserver():
-    # request any card type
-    cardtype = AnyCardType()
-    cardrequest = CardRequest(timeout=1, cardType=cardtype)
-    cardservice = cardrequest.waitforcard()
-
-    observer=ConsoleCardConnectionObserver()
-    cardservice.connection.addObserver(observer)
-    
-    cardservice.connection.connect()
-    print('ATR: ' + toHexString(cardservice.connection.getATR()))
-    # get reader used for the connection
-    # device = cardservice.connection.getReader()
-
-
-    GET_RESPONSE = [0XA0, 0XC0, 00, 00 ]
-    SELECT = [0xA0, 0xA4, 0x00, 0x00, 0x02]
-    DF_TELECOM = [0x7F, 0x10]
-    
-    apdu = SELECT+DF_TELECOM
-    response, sw1, sw2 = cardservice.connection.transmit(apdu)
-    if sw1 == 0x9F:
-            apdu = GET_RESPONSE + [sw2]
-            response, sw1, sw2 = cardservice.connection.transmit(apdu)
-    else:
-        print('no DF_TELECOM')
-
-
-
 
 if __name__ == '__main__':
     try:
